@@ -67,7 +67,12 @@ module Sinatra #:nodoc:
 
         EM.next_tick {
           begin
-            send(:__async_callback, *bargs)
+            res = catch(:halt) do
+              send(:__async_callback, *bargs)
+              nil
+            end
+            # res is non-nil (contains a rack-esque array or string) only if a :halt is thrown
+            handle_failure(res) unless res.nil?
           rescue ::Exception => boom
             if options.show_exceptions?
               # HACK: handle_exception! re-raises the exception if show_exceptions?,
@@ -95,6 +100,39 @@ module Sinatra #:nodoc:
         request.env['async.callback'][
           [response.status, response.headers, response.body]
         ] if respond_to?(:__async_callback)
+      end
+      
+      # taken from Sinatra::Base#invoke, cannot reuse the existing <tt>#invoke</tt> method since it contains a <tt>return</tt> clause.
+      def handle_failure(res)
+        case
+        when res.respond_to?(:to_str)
+          @response.body = [res]
+        when res.respond_to?(:to_ary)
+          res = res.to_ary
+          if Fixnum === res.first
+            if res.length == 3
+              @response.status, headers, body = res
+              @response.body = body if body
+              headers.each { |k, v| @response.headers[k] = v } if headers
+            elsif res.length == 2
+              @response.status = res.first
+              @response.body   = res.last
+            else
+              raise TypeError, "#{res.inspect} not supported"
+            end
+          else
+            @response.body = res
+          end
+        when res.respond_to?(:each)
+          @response.body = res
+        when (100...599) === res
+          @response.status = res
+        end
+
+        if (new_body = error_block!(@response.status))
+          @response.body = new_body
+        end
+        body @response.body
       end
     end
 
